@@ -1,0 +1,193 @@
+from io import BytesIO
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from PIL import Image
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.db import Base, get_db
+from app.main import app, settings
+from app.models import Profile, User
+from app.security import hash_password
+
+
+@pytest.fixture
+def environment(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+    @event.listens_for(engine, "connect")
+    def foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    settings.upload_dir = str(tmp_path / "uploads")
+    with Session(engine) as db:
+        admin = User(id=uuid4(), email="admin@example.com", display_name="Админ", password_hash=hash_password("very-secure-password"), role="super_admin", access_granted=True)
+        profile = Profile(id=uuid4(), display_name="Нурасыл", username="nurasyl")
+        db.add_all([admin, profile])
+        db.commit()
+        profile_id = str(profile.id)
+
+    def override_db():
+        with Session(engine, autoflush=False, expire_on_commit=False) as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    yield profile_id
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def csrf(client: TestClient) -> dict:
+    return {"X-CSRF-Token": client.cookies.get("csrf_token")}
+
+
+def test_private_post_invitation_comments_and_reactions(environment):
+    profile_id = environment
+    guest = TestClient(app)
+    admin = TestClient(app)
+    assert guest.get("/api/posts").json()["items"] == []
+    assert admin.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    created = admin.post("/api/posts", headers=csrf(admin), json={
+        "author_profile_id": profile_id, "title": "Первый день", "content": "Мы встретились",
+        "status": "published", "visibility": "invited", "event_date": "2026-01-01",
+    })
+    assert created.status_code == 201, created.text
+    post_id = created.json()["id"]
+    assert guest.get(f"/api/posts/{post_id}").status_code == 404
+    assert admin.post(f"/api/posts/{post_id}/like").status_code == 403  # CSRF is required.
+
+    invited = admin.post("/api/admin/invitations", headers=csrf(admin), json={"email": "member@example.com", "role": "member"})
+    assert invited.status_code == 201, invited.text
+    member = TestClient(app)
+    accepted = member.post("/api/auth/accept-invitation", json={"token": invited.json()["token"], "display_name": "Друг", "password": "another-secure-password"})
+    assert accepted.status_code == 200, accepted.text
+    assert member.get("/api/posts").json()["total"] == 1
+    private_post = admin.post("/api/posts", headers=csrf(admin), json={"author_profile_id": profile_id, "content": "Только для администраторов", "status": "published", "visibility": "private"})
+    assert private_post.status_code == 201
+    assert member.get(f"/api/posts/{private_post.json()['id']}").status_code == 404
+    root = member.post(f"/api/posts/{post_id}/comments", headers=csrf(member), json={"content": "Какой день!"})
+    assert root.status_code == 201, root.text
+    reply = member.post(f"/api/comments/{root.json()['id']}/replies", headers=csrf(member), json={"content": "Да!"})
+    assert reply.status_code == 201, reply.text
+    assert member.get(f"/api/posts/{post_id}/comments", params={"parent_id": root.json()["id"]}).json()["total"] == 1
+    assert member.post(f"/api/posts/{post_id}/like", headers=csrf(member)).status_code == 200
+    assert member.post(f"/api/posts/{post_id}/like", headers=csrf(member)).status_code == 200
+    assert member.get(f"/api/posts/{post_id}").json()["likes_count"] == 1
+    assert member.post(f"/api/posts/{post_id}/bookmark", headers=csrf(member)).status_code == 200
+    assert len(member.get("/api/bookmarks").json()) == 1
+    assert member.delete(f"/api/posts/{post_id}/like", headers=csrf(member)).status_code == 200
+    assert member.get(f"/api/posts/{post_id}").json()["likes_count"] == 0
+    assert admin.delete(f"/api/posts/{post_id}", headers=csrf(admin)).status_code == 200
+    assert admin.get("/api/admin/posts", params={"status": "deleted"}).json()["total"] == 1
+    assert member.get(f"/api/posts/{post_id}").status_code == 404
+    assert admin.post(f"/api/posts/{post_id}/restore", headers=csrf(admin)).status_code == 200
+    assert member.get(f"/api/posts/{post_id}").status_code == 200
+
+
+def test_public_visibility_requires_site_setting(environment):
+    admin = TestClient(app)
+    guest = TestClient(app)
+    admin.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"})
+    created = admin.post("/api/posts", headers=csrf(admin), json={"author_profile_id": environment, "content": "Привет", "status": "published", "visibility": "public"})
+    assert created.status_code == 201, created.text
+    assert guest.get("/api/posts").json()["total"] == 0
+    assert admin.patch("/api/admin/settings", headers=csrf(admin), json={"site_public": True}).status_code == 200
+    assert guest.get("/api/posts").json()["total"] == 1
+
+
+def test_private_media_and_open_registration_do_not_expose_memories(environment):
+    admin = TestClient(app)
+    guest = TestClient(app)
+    admin.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"})
+    image = BytesIO()
+    Image.new("RGB", (10, 10), "#d88d85").save(image, format="PNG")
+    uploaded = admin.post("/api/admin/media", headers=csrf(admin), files={"file": ("memory.png", image.getvalue(), "image/png")})
+    assert uploaded.status_code == 201, uploaded.text
+    media_id = uploaded.json()["id"]
+    assert guest.get(f"/api/media/{media_id}").status_code == 404
+    post = admin.post("/api/posts", headers=csrf(admin), json={"author_profile_id": environment, "content": "Только свои", "status": "published", "visibility": "private", "media": [{"media_id": media_id, "alt_text": "Розовое фото"}]})
+    assert post.status_code == 201, post.text
+    assert guest.get(f"/api/media/{media_id}").status_code == 404
+    assert admin.patch("/api/admin/settings", headers=csrf(admin), json={"registration_enabled": True, "site_public": True}).status_code == 200
+    newcomer = TestClient(app)
+    registered = newcomer.post("/api/auth/register", json={"email": "new@example.com", "display_name": "Новичок", "password": "new-strong-password"})
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["access_granted"] is False
+    assert newcomer.get("/api/posts").json()["total"] == 0
+    assert newcomer.get(f"/api/posts/{post.json()['id']}").status_code == 404
+    assert newcomer.get(f"/api/media/{media_id}").status_code == 404
+
+
+def test_refresh_logout_and_scheduled_publication(environment):
+    admin = TestClient(app)
+    assert admin.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    old_refresh = admin.cookies.get("refresh_token")
+    assert admin.post("/api/auth/refresh", headers=csrf(admin)).status_code == 200
+    assert admin.cookies.get("refresh_token") != old_refresh
+    scheduled_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    created = admin.post("/api/posts", headers=csrf(admin), json={"author_profile_id": environment, "content": "По расписанию", "status": "scheduled", "visibility": "invited", "scheduled_at": scheduled_at})
+    assert created.status_code == 201, created.text
+    assert admin.get("/api/posts").json()["total"] == 1
+    assert admin.get(f"/api/posts/{created.json()['id']}").json()["status"] == "published"
+    assert admin.post("/api/auth/logout", headers=csrf(admin)).status_code == 200
+    assert admin.get("/api/auth/me").status_code == 401
+
+
+def test_selected_comment_access_and_moderation(environment):
+    admin = TestClient(app)
+    admin.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"})
+    members = []
+    for number in (1, 2):
+        invite = admin.post("/api/admin/invitations", headers=csrf(admin), json={"email": f"member{number}@example.com", "role": "member"})
+        member = TestClient(app)
+        accepted = member.post("/api/auth/accept-invitation", json={"token": invite.json()["token"], "display_name": f"Участник {number}", "password": "another-secure-password"})
+        members.append((member, accepted.json()["id"]))
+    post = admin.post("/api/posts", headers=csrf(admin), json={"author_profile_id": environment, "content": "Разговор", "status": "published", "visibility": "invited", "comment_access": "selected", "allowed_comment_user_ids": [members[0][1]], "moderate_comments": True})
+    assert post.status_code == 201, post.text
+    post_id = post.json()["id"]
+    denied = members[1][0].post(f"/api/posts/{post_id}/comments", headers=csrf(members[1][0]), json={"content": "Нельзя"})
+    assert denied.status_code == 403
+    pending = members[0][0].post(f"/api/posts/{post_id}/comments", headers=csrf(members[0][0]), json={"content": "На проверке"})
+    assert pending.status_code == 201 and pending.json()["moderation_status"] == "pending"
+    assert members[1][0].get(f"/api/posts/{post_id}/comments").json()["total"] == 0
+    approved = admin.patch(f"/api/admin/comments/{pending.json()['id']}/moderate", headers=csrf(admin), params={"action": "approve"})
+    assert approved.status_code == 200
+    assert members[1][0].get(f"/api/posts/{post_id}/comments").json()["total"] == 1
+    assert members[0][0].get("/api/admin/stats").status_code == 403
+    revoked = admin.patch(f"/api/admin/users/{members[0][1]}", headers=csrf(admin), json={"access_granted": False, "role": "admin"})
+    assert revoked.status_code == 200
+    assert members[0][0].get(f"/api/posts/{post_id}").status_code == 404
+    assert members[0][0].get("/api/admin/stats").status_code == 403
+
+
+def test_invitation_cannot_reset_privileged_accounts_without_super_admin(environment):
+    owner = TestClient(app)
+    assert owner.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    assert owner.post("/api/admin/invitations", headers=csrf(owner), json={"email": "admin@example.com", "role": "member"}).status_code == 403
+
+    invite = owner.post("/api/admin/invitations", headers=csrf(owner), json={"email": "other-admin@example.com", "role": "admin"})
+    assert invite.status_code == 201
+    administrator = TestClient(app)
+    accepted = administrator.post("/api/auth/accept-invitation", json={"token": invite.json()["token"], "display_name": "Администратор", "password": "another-secure-password"})
+    assert accepted.status_code == 200
+    assert administrator.post("/api/admin/invitations", headers=csrf(administrator), json={"email": "admin@example.com", "role": "member"}).status_code == 403
+    assert administrator.post("/api/admin/invitations", headers=csrf(administrator), json={"email": "other-admin@example.com", "role": "member"}).status_code == 403
+
+    member_invite = owner.post("/api/admin/invitations", headers=csrf(owner), json={"email": "future-admin@example.com", "role": "member"})
+    member = TestClient(app)
+    created = member.post("/api/auth/accept-invitation", json={"token": member_invite.json()["token"], "display_name": "Участник", "password": "member-secure-password"})
+    assert created.status_code == 200
+    stale_invite = administrator.post("/api/admin/invitations", headers=csrf(administrator), json={"email": "future-admin@example.com", "role": "member"})
+    assert stale_invite.status_code == 201
+    promoted = owner.patch(f"/api/admin/users/{created.json()['id']}", headers=csrf(owner), json={"role": "admin"})
+    assert promoted.status_code == 200
+    assert member.post("/api/auth/accept-invitation", json={"token": stale_invite.json()["token"], "display_name": "Самозванец", "password": "attacker-password"}).status_code == 403
+
+    recovery = owner.post("/api/admin/invitations", headers=csrf(owner), json={"email": "other-admin@example.com", "role": "member"})
+    assert recovery.status_code == 201
+    assert administrator.post("/api/auth/accept-invitation", json={"token": recovery.json()["token"], "display_name": "Администратор", "password": "new-admin-password"}).status_code == 200
