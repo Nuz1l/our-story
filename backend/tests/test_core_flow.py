@@ -156,7 +156,7 @@ def test_avatar_follows_existing_author_posts_and_comments(environment):
 def test_video_larger_than_old_limit_uploads_in_chunks(environment):
     client = TestClient(app)
     assert client.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
-    content = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * (30 * 1024 * 1024)
+    content = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * (26 * 1024 * 1024)
     upload_id = str(uuid4())
     chunk_size = 2 * 1024 * 1024
     total = (len(content) + chunk_size - 1) // chunk_size

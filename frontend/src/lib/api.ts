@@ -14,8 +14,8 @@ export async function uploadMedia(file: File, onProgress?: (percent: number) => 
     onProgress?.(100);
     return result;
   }
-  if (file.size > 500 * 1024 * 1024) {
-    throw new Error("Файл должен быть не больше 500 МБ");
+  if (file.size > 30 * 1024 * 1024) {
+    throw new Error("Файл должен быть не больше 30 МБ");
   }
   const uploadId = crypto.randomUUID();
   const chunkSize = 2 * 1024 * 1024;

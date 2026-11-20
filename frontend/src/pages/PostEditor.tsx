@@ -499,7 +499,7 @@ export function PostEditor() {
           <section className="panel">
             <h2>Фото и видео</h2>
             <p className="muted tiny">
-              JPG, PNG, WebP, MP4 и WebM до 500 МБ. Изображения можно обрезать по
+              JPG, PNG, WebP, MP4 и WebM до 30 МБ. Изображения можно обрезать по
               центру и повернуть перед загрузкой.
             </p>
             <div className="media-tools">
