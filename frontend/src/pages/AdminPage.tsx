@@ -17,7 +17,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react";
-import { api, errorMessage } from "../lib/api";
+import { api, errorMessage, uploadMedia } from "../lib/api";
 import type {
   Category,
   Comment,
@@ -526,11 +526,9 @@ function ProfilesAdmin() {
     setMessage("");
   }
   async function uploadAvatar(file: File) {
-    const form = new FormData();
-    form.append("file", file);
     try {
-      const r = await api.post<{ id: string }>("/admin/media", form);
-      setAvatarId(r.data.id);
+      const uploaded = await uploadMedia(file);
+      setAvatarId(uploaded.id);
     } catch (err) {
       setMessage(errorMessage(err));
     }

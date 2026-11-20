@@ -9,10 +9,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -418,6 +419,10 @@ def gallery(limit: int = Query(100, ge=1, le=200), db: Session = Depends(get_db)
 @app.post("/api/admin/media", status_code=201, dependencies=[Depends(csrf_protect)])
 async def upload_media(file: UploadFile = File(...), user: User = Depends(admin_user), db: Session = Depends(get_db)):
     raw = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    return await store_media(raw, file.filename or "upload", user, db)
+
+
+async def store_media(raw: bytes, filename: str, user: User, db: Session) -> dict:
     if len(raw) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, "Файл слишком большой")
     if not raw:
@@ -442,10 +447,14 @@ async def upload_media(file: UploadFile = File(...), user: User = Depends(admin_
     if not kind:
         raise HTTPException(415, "Поддерживаются JPG, PNG, WebP, MP4 и WebM")
     key = f"{uuid4().hex}{ext}"
-    upload_dir = Path(settings.upload_dir).resolve()
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    (upload_dir / key).write_bytes(raw)
-    media = Media(storage_key=key, media_type=kind, mime_type=mime, original_name=Path(file.filename or key).name[:255],
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import put_blob
+        await put_blob(key, raw, access="private", content_type=mime)
+    else:
+        upload_dir = Path(settings.upload_dir).resolve()
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / key).write_bytes(raw)
+    media = Media(storage_key=key, media_type=kind, mime_type=mime, original_name=Path(filename).name[:255],
                   size_bytes=len(raw), width=width, height=height, uploaded_by_user_id=user.id)
     db.add(media)
     db.flush()
@@ -455,8 +464,69 @@ async def upload_media(file: UploadFile = File(...), user: User = Depends(admin_
             "size_bytes": media.size_bytes, "width": width, "height": height}
 
 
+CHUNK_BYTES = 2 * 1024 * 1024
+
+
+class CompleteUpload(BaseModel):
+    upload_id: UUID
+    total: int
+    filename: str
+
+
+@app.post("/api/admin/media/chunk", dependencies=[Depends(csrf_protect)])
+async def upload_media_chunk(upload_id: UUID = Form(...), index: int = Form(...),
+                             file: UploadFile = File(...), user: User = Depends(admin_user)):
+    max_chunks = (settings.max_upload_mb * 1024 * 1024 + CHUNK_BYTES - 1) // CHUNK_BYTES
+    if index < 0 or index >= max_chunks:
+        raise HTTPException(422, "Invalid chunk index")
+    raw = await file.read(CHUNK_BYTES + 1)
+    if not raw or len(raw) > CHUNK_BYTES:
+        raise HTTPException(413, "Invalid chunk size")
+    key = f"tmp/{user.id}/{upload_id}/{index}"
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import put_blob
+        await put_blob(key, raw, access="private", content_type="application/octet-stream")
+    else:
+        path = Path(settings.upload_dir).resolve() / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    return {"ok": True}
+
+
+@app.post("/api/admin/media/complete", status_code=201, dependencies=[Depends(csrf_protect)])
+async def complete_media_upload(payload: CompleteUpload, user: User = Depends(admin_user),
+                                db: Session = Depends(get_db)):
+    max_chunks = (settings.max_upload_mb * 1024 * 1024 + CHUNK_BYTES - 1) // CHUNK_BYTES
+    if not 1 <= payload.total <= max_chunks:
+        raise HTTPException(422, "Invalid chunk count")
+    prefix = f"tmp/{user.id}/{payload.upload_id}/"
+    keys = [f"{prefix}{index}" for index in range(payload.total)]
+    parts = []
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import get_blob, delete_blob
+        from vercel.blob.errors import BlobNotFoundError
+        try:
+            for key in keys:
+                parts.append((await get_blob(key, access="private")).body)
+        except BlobNotFoundError:
+            raise HTTPException(422, "Upload is incomplete") from None
+    else:
+        for key in keys:
+            path = Path(settings.upload_dir).resolve() / key
+            if not path.is_file():
+                raise HTTPException(422, "Upload is incomplete")
+            parts.append(path.read_bytes())
+    result = await store_media(b"".join(parts), payload.filename, user, db)
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        await delete_blob(keys)
+    else:
+        for key in keys:
+            (Path(settings.upload_dir).resolve() / key).unlink(missing_ok=True)
+    return result
+
+
 @app.get("/api/media/{media_id}")
-def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | None = Depends(optional_user)):
+async def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | None = Depends(optional_user)):
     media = db.get(Media, media_id)
     if not media:
         raise HTTPException(404, "Файл не найден")
@@ -473,6 +543,16 @@ def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | None =
             allowed = any(can_see_post(db, post, user) for post in posts)
     if not allowed:
         raise HTTPException(404, "Файл не найден")
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import stream_blob
+
+        async def chunks():
+            async with stream_blob(media.storage_key, access="private") as download:
+                async for chunk in download:
+                    yield chunk
+
+        return StreamingResponse(chunks(), media_type=media.mime_type,
+                                 headers={"Cache-Control": "private, max-age=300", "X-Robots-Tag": "noindex"})
     path = (Path(settings.upload_dir).resolve() / media.storage_key)
     if not path.is_file():
         raise HTTPException(404, "Файл недоступен")
@@ -496,7 +576,7 @@ def admin_media(q: str = "", kind: str = "", user: User = Depends(admin_user), d
 
 
 @app.delete("/api/admin/media/{media_id}", dependencies=[Depends(csrf_protect)])
-def delete_media(media_id: UUID, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+async def delete_media(media_id: UUID, user: User = Depends(admin_user), db: Session = Depends(get_db)):
     media = db.get(Media, media_id)
     if not media:
         raise HTTPException(404, "Файл не найден")
@@ -505,11 +585,15 @@ def delete_media(media_id: UUID, user: User = Depends(admin_user), db: Session =
         db.scalar(select(Profile.id).where(Profile.avatar_media_id == media_id)) or
         str(media_id) in {site_values.get("logo_media_id"), site_values.get("favicon_media_id"), site_values.get("background_media_id")}):
         raise HTTPException(409, "Файл используется в публикации, профиле или настройках сайта")
-    path = Path(settings.upload_dir).resolve() / media.storage_key
+    key = media.storage_key
     db.delete(media)
     audit(db, user, "delete", "media", media.id)
     db.commit()
-    path.unlink(missing_ok=True)
+    if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import delete_blob
+        await delete_blob(key)
+    else:
+        (Path(settings.upload_dir).resolve() / key).unlink(missing_ok=True)
     return {"ok": True}
 
 

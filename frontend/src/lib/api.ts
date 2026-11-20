@@ -2,6 +2,38 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
 export const api = axios.create({ baseURL: "/api", withCredentials: true });
 
+export async function uploadMedia(file: File): Promise<{
+  id: string;
+  url: string;
+  media_type: "image" | "video";
+}> {
+  if (file.size <= 3 * 1024 * 1024) {
+    const form = new FormData();
+    form.append("file", file);
+    return (await api.post("/admin/media", form)).data;
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    throw new Error("Файл должен быть не больше 25 МБ");
+  }
+  const uploadId = crypto.randomUUID();
+  const chunkSize = 2 * 1024 * 1024;
+  const total = Math.ceil(file.size / chunkSize);
+  for (let index = 0; index < total; index++) {
+    const form = new FormData();
+    form.append("upload_id", uploadId);
+    form.append("index", String(index));
+    form.append("file", file.slice(index * chunkSize, (index + 1) * chunkSize));
+    await api.post("/admin/media/chunk", form);
+  }
+  return (
+    await api.post("/admin/media/complete", {
+      upload_id: uploadId,
+      total,
+      filename: file.name,
+    })
+  ).data;
+}
+
 function cookie(name: string) {
   return document.cookie
     .split("; ")
@@ -49,6 +81,7 @@ api.interceptors.response.use(
 );
 
 export function errorMessage(error: unknown): string {
+  if (error instanceof Error && !axios.isAxiosError(error)) return error.message;
   if (axios.isAxiosError(error)) {
     const detail = error.response?.data?.detail;
     if (typeof detail === "string") return detail;

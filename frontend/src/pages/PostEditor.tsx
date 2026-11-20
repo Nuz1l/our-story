@@ -11,7 +11,7 @@ import {
   Trash2,
   UploadCloud,
 } from "lucide-react";
-import { api, errorMessage } from "../lib/api";
+import { api, errorMessage, uploadMedia } from "../lib/api";
 import type { Category, Media, Post, Profile, User } from "../lib/types";
 
 type MediaDraft = Pick<
@@ -242,22 +242,16 @@ export function PostEditor() {
         const prepared = file.type.startsWith("image/")
           ? await transformImage(file, ratio, rotation)
           : file;
-        const form = new FormData();
-        form.append("file", prepared);
-        const response = await api.post<{
-          id: string;
-          url: string;
-          media_type: "image" | "video";
-        }>("/admin/media", form);
+        const uploaded = await uploadMedia(prepared);
         setDirty(true);
         setDraft((d) => ({
           ...d,
           media: [
             ...d.media,
             {
-              id: response.data.id,
-              url: response.data.url,
-              media_type: response.data.media_type,
+              id: uploaded.id,
+              url: uploaded.url,
+              media_type: uploaded.media_type,
               alt_text: "",
               sort_order: d.media.length,
               is_cover: d.media.length === 0,

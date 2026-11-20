@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImagePlus, UploadCloud } from "lucide-react";
-import { api, errorMessage } from "../lib/api";
+import { api, errorMessage, uploadMedia } from "../lib/api";
 import type { SiteInfo } from "../lib/types";
 
 const assets = [
@@ -34,10 +34,8 @@ export function BrandingAdmin() {
     setBusy(key);
     setMessage("");
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const uploaded = await api.post<{ id: string }>("/admin/media", form);
-      await api.patch("/admin/settings", { [key]: uploaded.data.id });
+      const uploaded = await uploadMedia(file);
+      await api.patch("/admin/settings", { [key]: uploaded.id });
       await queryClient.invalidateQueries({ queryKey: ["admin-settings"] });
       queryClient.invalidateQueries({ queryKey: ["site"] });
       setMessage("Изображение обновлено");

@@ -11,4 +11,5 @@ Pillow>=11,<13
 email-validator>=2.2,<3
 pytest>=8,<10
 httpx>=0.28,<1
+vercel-blob>=0.5,<1
 
