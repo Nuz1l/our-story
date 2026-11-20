@@ -63,7 +63,13 @@ function ProfileEditor({ initial }: { initial: OwnProfile }) {
       const response = await api.post<OwnProfile>("/profile/avatar", form);
       setAvatar(response.data.avatar_url);
       queryClient.setQueryData(["my-profile"], response.data);
+      queryClient.setQueryData<User | null>(["me"], (current) =>
+        current ? { ...current, avatar_url: response.data.avatar_url } : current,
+      );
       queryClient.invalidateQueries({ queryKey: ["profiles"] });
+      queryClient.invalidateQueries({ queryKey: ["posts"] });
+      queryClient.invalidateQueries({ queryKey: ["post"] });
+      queryClient.invalidateQueries({ queryKey: ["comments"] });
       setMessage("Аватар сохранён");
     } catch (cause) {
       setError(errorMessage(cause));

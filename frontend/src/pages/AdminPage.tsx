@@ -170,7 +170,11 @@ function Dashboard() {
           {stats.data?.recent_comments.map((x) => (
             <div className="activity-row" key={x.id}>
               <span className="comment-avatar mini">
-                {x.author_name.charAt(0)}
+                {x.author_avatar_url ? (
+                  <img src={x.author_avatar_url} alt="" />
+                ) : (
+                  x.author_name.charAt(0)
+                )}
               </span>
               <span>
                 <strong>{x.author_name}</strong>

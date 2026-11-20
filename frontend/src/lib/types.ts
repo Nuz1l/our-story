@@ -2,6 +2,7 @@ export type User = {
   id: string;
   email: string;
   display_name: string;
+  avatar_url?: string | null;
   role: "super_admin" | "admin" | "member";
   access_granted: boolean;
   is_active?: boolean;
@@ -69,6 +70,7 @@ export type Comment = {
   parent_id: string | null;
   user_id: string;
   author_name: string;
+  author_avatar_url: string | null;
   content: string;
   moderation_status: string;
   created_at: string;

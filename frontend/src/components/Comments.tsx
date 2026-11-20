@@ -133,7 +133,11 @@ function CommentNode({
   return (
     <div className={`comment-node depth-${Math.min(depth, 3)}`}>
       <span className="comment-avatar">
-        {comment.author_name.charAt(0).toUpperCase()}
+        {comment.author_avatar_url ? (
+          <img src={comment.author_avatar_url} alt="" />
+        ) : (
+          comment.author_name.charAt(0).toUpperCase()
+        )}
       </span>
       <div className="comment-body">
         <div className="comment-head">

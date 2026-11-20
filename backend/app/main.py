@@ -134,8 +134,11 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 
 @app.get("/api/auth/me")
-def me(user: User = Depends(current_user)):
-    return {"id": str(user.id), "email": user.email, "display_name": user.display_name, "role": user.role, "access_granted": user.access_granted}
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = linked_profile(db, user)
+    return {"id": str(user.id), "email": user.email, "display_name": user.display_name,
+            "role": user.role, "access_granted": user.access_granted,
+            "avatar_url": f"/api/media/{profile.avatar_media_id}" if profile and profile.avatar_media_id else None}
 
 
 @app.post("/api/auth/change-password", dependencies=[Depends(csrf_protect)])
@@ -154,6 +157,15 @@ def linked_profile(db: Session, user: User) -> Profile | None:
 
 
 def create_linked_profile(db: Session, user: User) -> Profile:
+    author_ids = db.scalars(
+        select(Profile.id).join(Post, Post.author_profile_id == Profile.id)
+        .where(Post.created_by_user_id == user.id, Profile.linked_user_id.is_(None),
+               Profile.display_name == user.display_name).distinct()
+    ).all()
+    if len(author_ids) == 1:
+        profile = db.get(Profile, author_ids[0])
+        profile.linked_user_id = user.id
+        return profile
     profile = Profile(display_name=user.display_name, username=f"user_{user.id.hex}",
                       linked_user_id=user.id, is_active=True)
     db.add(profile)

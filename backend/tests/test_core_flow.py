@@ -125,6 +125,33 @@ def test_user_can_edit_own_profile_and_avatar(environment):
     assert client.get(avatar.json()["avatar_url"]).status_code == 200
 
 
+def test_avatar_follows_existing_author_posts_and_comments(environment):
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    name = client.get("/api/auth/me").json()["display_name"]
+    author = client.post("/api/admin/profiles", headers=csrf(client), json={
+        "display_name": name, "username": "admin_author",
+    })
+    assert author.status_code == 201, author.text
+    post = client.post("/api/posts", headers=csrf(client), json={
+        "author_profile_id": author.json()["id"], "content": "Фото автора",
+        "status": "published", "visibility": "private",
+    })
+    assert post.status_code == 201, post.text
+    image = BytesIO()
+    Image.new("RGB", (20, 20), "#aabbcc").save(image, format="PNG")
+    avatar = client.post("/api/profile/avatar", headers=csrf(client), files={"file": ("avatar.png", image.getvalue(), "image/png")})
+    assert avatar.status_code == 200, avatar.text
+    assert avatar.json()["id"] == author.json()["id"]
+    avatar_url = avatar.json()["avatar_url"]
+    assert client.get("/api/auth/me").json()["avatar_url"] == avatar_url
+    assert client.get(f"/api/posts/{post.json()['id']}").json()["author"]["avatar_url"] == avatar_url
+    comment = client.post(f"/api/posts/{post.json()['id']}/comments", headers=csrf(client), json={"content": "Привет"})
+    assert comment.status_code == 201, comment.text
+    comments = client.get(f"/api/posts/{post.json()['id']}/comments").json()
+    assert comments["items"][0]["author_avatar_url"] == avatar_url
+
+
 def test_private_media_and_open_registration_do_not_expose_memories(environment):
     admin = TestClient(app)
     guest = TestClient(app)

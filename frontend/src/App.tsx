@@ -261,7 +261,11 @@ export function App() {
           {user ? (
             <div className="user-chip">
               <span className="user-avatar">
-                {user.display_name.charAt(0).toUpperCase()}
+                {user.avatar_url ? (
+                  <img src={user.avatar_url} alt="" />
+                ) : (
+                  user.display_name.charAt(0).toUpperCase()
+                )}
               </span>
               <span>
                 <strong>{user.display_name}</strong>

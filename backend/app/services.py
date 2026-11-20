@@ -126,11 +126,13 @@ def post_dict(db: Session, post: Post, user: User | None) -> dict:
 
 def comment_dict(db: Session, comment: Comment, user: User | None) -> dict:
     author = db.get(User, comment.user_id)
+    author_profile = db.scalar(select(Profile).where(Profile.linked_user_id == comment.user_id).order_by(Profile.created_at))
     likes = db.scalar(select(func.count()).select_from(CommentLike).where(CommentLike.comment_id == comment.id)) or 0
     replies = db.scalar(select(func.count()).select_from(Comment).where(Comment.parent_id == comment.id, Comment.deleted_at.is_(None), Comment.moderation_status == "approved")) or 0
     return {
         "id": str(comment.id), "post_id": str(comment.post_id), "parent_id": str(comment.parent_id) if comment.parent_id else None,
         "user_id": str(comment.user_id), "author_name": author.display_name if author else "Участник",
+        "author_avatar_url": f"/api/media/{author_profile.avatar_media_id}" if author_profile and author_profile.avatar_media_id else None,
         "content": comment.content, "moderation_status": comment.moderation_status,
         "created_at": comment.created_at, "updated_at": comment.updated_at,
         "likes_count": likes, "replies_count": replies,
