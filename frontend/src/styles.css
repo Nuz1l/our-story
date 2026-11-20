@@ -2552,3 +2552,100 @@ tr:last-child td {
   font-size: 0.7rem;
   font-weight: 700;
 }
+
+.profile-page {
+  max-width: 1050px;
+  margin: 0 auto;
+  padding: 38px 30px 70px;
+}
+.profile-page .page-heading h1 {
+  margin: 6px 0 8px;
+  font: 500 clamp(2rem, 4vw, 3rem) Georgia, serif;
+}
+.profile-page .page-heading > p:last-child {
+  color: var(--muted);
+}
+.profile-edit-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 24px;
+  align-items: start;
+  margin-top: 28px;
+}
+.profile-preview,
+.profile-edit-form {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  padding: 28px;
+}
+.profile-preview {
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.profile-preview-avatar {
+  width: 132px;
+  height: 132px;
+  margin: 0 auto 18px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.profile-preview-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.profile-preview h2 {
+  margin: 0;
+  font: 500 1.7rem Georgia, serif;
+}
+.profile-preview > p {
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.profile-social-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+.profile-social-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+.profile-edit-form {
+  gap: 18px;
+}
+.profile-upload-button {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.profile-upload-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.profile-save-message {
+  color: var(--accent);
+  font-weight: 700;
+}
+@media (max-width: 760px) {
+  .profile-page { padding: 24px 16px 80px; }
+  .profile-edit-layout { grid-template-columns: 1fr; }
+}

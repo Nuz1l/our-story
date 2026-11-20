@@ -513,6 +513,9 @@ function ProfilesAdmin() {
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [bio, setBio] = useState("");
+  const [age, setAge] = useState("");
+  const [instagram, setInstagram] = useState("");
+  const [tiktok, setTiktok] = useState("");
   const [avatarId, setAvatarId] = useState<string | null>(null);
   const [active, setActive] = useState(true);
   const [message, setMessage] = useState("");
@@ -521,6 +524,9 @@ function ProfilesAdmin() {
     setName(profile?.display_name || "");
     setUsername(profile?.username || "");
     setBio(profile?.bio || "");
+    setAge(profile?.age?.toString() || "");
+    setInstagram(profile?.instagram_url || "");
+    setTiktok(profile?.tiktok_url || "");
     setAvatarId(profile?.avatar_url?.split("/").pop() || null);
     setActive(profile?.is_active ?? true);
     setMessage("");
@@ -540,6 +546,9 @@ function ProfilesAdmin() {
         display_name: name,
         username,
         bio,
+        age: age ? Number(age) : null,
+        instagram_url: instagram.trim() || null,
+        tiktok_url: tiktok.trim() || null,
         avatar_media_id: avatarId,
         is_active: active,
       };
@@ -576,6 +585,9 @@ function ProfilesAdmin() {
             <h3>{p.display_name}</h3>
             <span className="handle">@{p.username}</span>
             <p>{p.bio || "Автор воспоминаний"}</p>
+            {p.age && <p>{p.age} лет</p>}
+            {p.instagram_url && <a href={p.instagram_url} target="_blank" rel="noopener noreferrer">Instagram</a>}
+            {p.tiktok_url && <a href={p.tiktok_url} target="_blank" rel="noopener noreferrer">TikTok</a>}
             <span
               className={`status-badge ${p.is_active ? "published" : "archived"}`}
             >
@@ -626,6 +638,18 @@ function ProfilesAdmin() {
                 onChange={(e) => setBio(e.target.value)}
                 rows={3}
               />
+            </label>
+            <label>
+              Возраст
+              <input type="number" min={1} max={120} value={age} onChange={(e) => setAge(e.target.value)} />
+            </label>
+            <label>
+              Ссылка на Instagram
+              <input type="url" value={instagram} onChange={(e) => setInstagram(e.target.value)} placeholder="https://www.instagram.com/username/" />
+            </label>
+            <label>
+              Ссылка на TikTok
+              <input type="url" value={tiktok} onChange={(e) => setTiktok(e.target.value)} placeholder="https://www.tiktok.com/@username" />
             </label>
             <label>
               Аватар

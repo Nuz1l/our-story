@@ -21,6 +21,7 @@ import {
   Settings,
   Sparkles,
   Sun,
+  UserRound,
   X,
 } from "lucide-react";
 import { api } from "./lib/api";
@@ -32,6 +33,9 @@ import { SavedPage } from "./pages/SavedPage";
 
 const AdminPage = lazy(() =>
   import("./pages/AdminPage").then((module) => ({ default: module.AdminPage })),
+);
+const ProfilePage = lazy(() =>
+  import("./pages/ProfilePage").then((module) => ({ default: module.ProfilePage })),
 );
 const LoginPage = lazy(() =>
   import("./pages/AuthPages").then((module) => ({ default: module.LoginPage })),
@@ -177,6 +181,7 @@ export function App() {
     { to: "/calendar", label: "Календарь", icon: CalendarDays },
   ];
   if (user) navItems.push({ to: "/saved", label: "Избранное", icon: Sparkles });
+  if (user) navItems.push({ to: "/profile", label: "Мой профиль", icon: UserRound });
   if (user?.access_granted && ["admin", "super_admin"].includes(user.role))
     navItems.push({ to: "/admin", label: "Управление", icon: Settings });
 
@@ -326,6 +331,10 @@ export function App() {
                 element={
                   user ? <SavedPage user={user} /> : <Navigate to="/login" />
                 }
+              />
+              <Route
+                path="/profile"
+                element={user ? <ProfilePage /> : <Navigate to="/login" />}
               />
               <Route
                 path="/admin/*"

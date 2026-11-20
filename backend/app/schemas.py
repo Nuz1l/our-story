@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationInfo, field_validator
 
 
 class LoginIn(BaseModel):
@@ -11,7 +12,26 @@ class LoginIn(BaseModel):
     password: str
 
 
-class ProfileIn(BaseModel):
+class ProfileSocialFields(BaseModel):
+    age: int | None = Field(default=None, ge=1, le=120)
+    instagram_url: str | None = Field(default=None, max_length=300)
+    tiktok_url: str | None = Field(default=None, max_length=300)
+
+    @field_validator("instagram_url", "tiktok_url")
+    @classmethod
+    def valid_social_link(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if not value:
+            return None
+        parsed = urlparse(value.strip())
+        hosts = {"instagram_url": {"instagram.com", "www.instagram.com"},
+                 "tiktok_url": {"tiktok.com", "www.tiktok.com"}}
+        if (parsed.scheme != "https" or parsed.hostname not in hosts[info.field_name]
+                or parsed.username or parsed.password or not parsed.path.strip("/")):
+            raise ValueError("Укажите полную HTTPS-ссылку на профиль нужной соцсети")
+        return value.strip()
+
+
+class ProfileIn(ProfileSocialFields):
     display_name: str = Field(min_length=1, max_length=100)
     username: str = Field(min_length=2, max_length=50, pattern=r"^[a-zA-Z0-9_.]+$")
     bio: str = Field(default="", max_length=1000)
@@ -20,13 +40,26 @@ class ProfileIn(BaseModel):
     is_active: bool = True
 
 
-class ProfilePatch(BaseModel):
+class ProfilePatch(ProfileSocialFields):
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
     username: str | None = Field(default=None, min_length=2, max_length=50, pattern=r"^[a-zA-Z0-9_.]+$")
     bio: str | None = Field(default=None, max_length=1000)
     avatar_media_id: UUID | None = None
     linked_user_id: UUID | None = None
     is_active: bool | None = None
+
+
+class OwnProfilePatch(ProfileSocialFields):
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    bio: str | None = Field(default=None, max_length=1000)
+    avatar_media_id: UUID | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def nonempty_name(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Имя не может быть пустым")
+        return value.strip() if value is not None else None
 
 
 class MediaRef(BaseModel):

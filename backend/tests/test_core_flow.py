@@ -100,6 +100,31 @@ def test_public_visibility_requires_site_setting(environment):
     assert guest.get("/api/posts").json()["total"] == 1
 
 
+def test_user_can_edit_own_profile_and_avatar(environment):
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    initial = client.get("/api/profile/me")
+    assert initial.status_code == 200
+    assert initial.json()["id"] is None
+    invalid = client.patch("/api/profile/me", headers=csrf(client), json={"instagram_url": "https://example.com/not-instagram"})
+    assert invalid.status_code == 422
+    saved = client.patch("/api/profile/me", headers=csrf(client), json={
+        "display_name": "Новое имя", "age": 25, "bio": "О себе",
+        "instagram_url": "https://www.instagram.com/example/",
+        "tiktok_url": "https://www.tiktok.com/@example",
+    })
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["age"] == 25
+    assert saved.json()["instagram_url"] == "https://www.instagram.com/example/"
+    assert client.get("/api/auth/me").json()["display_name"] == "Новое имя"
+    image = BytesIO()
+    Image.new("RGB", (20, 20), "#aabbcc").save(image, format="PNG")
+    avatar = client.post("/api/profile/avatar", headers=csrf(client), files={"file": ("avatar.png", image.getvalue(), "image/png")})
+    assert avatar.status_code == 200, avatar.text
+    assert avatar.json()["avatar_url"].startswith("/api/media/")
+    assert client.get(avatar.json()["avatar_url"]).status_code == 200
+
+
 def test_private_media_and_open_registration_do_not_expose_memories(environment):
     admin = TestClient(app)
     guest = TestClient(app)

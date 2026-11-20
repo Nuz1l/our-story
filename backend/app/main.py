@@ -22,7 +22,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import (AuditLog, Bookmark, Category, Comment, CommentLike, Invitation, Media,
                         ModerationHistory, Post, PostLike, PostMedia, Profile, SessionToken, SiteSetting, User, now)
-from app.schemas import (AcceptInvitationIn, CategoryIn, CommentIn, CommentPatch, InvitationIn,
+from app.schemas import (AcceptInvitationIn, CategoryIn, CommentIn, CommentPatch, InvitationIn, OwnProfilePatch,
                          LoginIn, PasswordChangeIn, PostIn, PostPatch, ProfileIn, ProfilePatch, RegisterIn, UserPatch)
 from app.security import (admin_user, check_login_rate_limit, clear_cookies, clear_login_rate_limit,
                           csrf_protect, current_user, hash_password, issue_session, optional_user,
@@ -147,6 +147,72 @@ def change_password(payload: PasswordChangeIn, user: User = Depends(current_user
     audit(db, user, "change_password", "user", user.id)
     db.commit()
     return {"ok": True, "message": "Войдите с новым паролем"}
+
+
+def linked_profile(db: Session, user: User) -> Profile | None:
+    return db.scalar(select(Profile).where(Profile.linked_user_id == user.id).order_by(Profile.created_at))
+
+
+def create_linked_profile(db: Session, user: User) -> Profile:
+    profile = Profile(display_name=user.display_name, username=f"user_{user.id.hex}",
+                      linked_user_id=user.id, is_active=True)
+    db.add(profile)
+    db.flush()
+    return profile
+
+
+@app.get("/api/profile/me")
+def my_profile(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = linked_profile(db, user)
+    return profile_dict(profile) if profile else {
+        "id": None, "display_name": user.display_name, "username": f"user_{user.id.hex}",
+        "avatar_url": None, "bio": "", "age": None, "instagram_url": None,
+        "tiktok_url": None, "is_active": True,
+    }
+
+
+@app.patch("/api/profile/me", dependencies=[Depends(csrf_protect)])
+def update_my_profile(payload: OwnProfilePatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not user.access_granted:
+        raise HTTPException(403, "Доступ к профилю не предоставлен")
+    data = payload.model_dump(exclude_unset=True)
+    if "avatar_media_id" in data and data["avatar_media_id"] is not None:
+        media = db.get(Media, data["avatar_media_id"])
+        if not media or media.media_type != "image" or media.uploaded_by_user_id != user.id:
+            raise HTTPException(422, "Аватар не найден")
+    profile = linked_profile(db, user) or create_linked_profile(db, user)
+    for key, value in data.items():
+        setattr(profile, key, value)
+    if "display_name" in data and data["display_name"] is not None:
+        user.display_name = data["display_name"].strip()
+        profile.display_name = user.display_name
+    audit(db, user, "update", "profile", profile.id)
+    db.commit()
+    return profile_dict(profile)
+
+
+@app.post("/api/profile/avatar", dependencies=[Depends(csrf_protect)])
+async def upload_my_avatar(file: UploadFile = File(...), user: User = Depends(current_user),
+                           db: Session = Depends(get_db)):
+    if not user.access_granted:
+        raise HTTPException(403, "Доступ к профилю не предоставлен")
+    raw = await file.read(3 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 3 * 1024 * 1024:
+        raise HTTPException(413, "Аватар должен быть не больше 3 МБ")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise HTTPException(415, "Поддерживаются JPG, PNG и WebP")
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(415, "Поддерживаются JPG, PNG и WebP") from None
+    saved = await store_media(raw, file.filename or "avatar.jpg", user, db)
+    profile = linked_profile(db, user) or create_linked_profile(db, user)
+    profile.avatar_media_id = UUID(saved["id"])
+    audit(db, user, "update_avatar", "profile", profile.id)
+    db.commit()
+    return profile_dict(profile)
 
 
 @app.get("/api/profiles")
@@ -530,7 +596,7 @@ async def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | 
     media = db.get(Media, media_id)
     if not media:
         raise HTTPException(404, "Файл не найден")
-    allowed = is_admin(user)
+    allowed = is_admin(user) or bool(user and media.uploaded_by_user_id == user.id)
     if not allowed:
         site_values = settings_dict(db)
         public = site_values["site_public"]

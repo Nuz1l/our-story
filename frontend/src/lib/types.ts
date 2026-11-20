@@ -12,6 +12,9 @@ export type Profile = {
   username: string;
   avatar_url: string | null;
   bio: string;
+  age: number | null;
+  instagram_url: string | null;
+  tiktok_url: string | null;
   is_active: boolean;
 };
 export type Category = { id: string; name: string; slug: string };

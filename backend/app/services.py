@@ -78,7 +78,9 @@ def profile_dict(profile: Profile | None) -> dict | None:
     return {
         "id": str(profile.id), "display_name": profile.display_name, "username": profile.username,
         "avatar_url": f"/api/media/{profile.avatar_media_id}" if profile.avatar_media_id else None,
-        "bio": profile.bio, "is_active": profile.is_active,
+        "bio": profile.bio, "age": profile.age,
+        "instagram_url": profile.instagram_url, "tiktok_url": profile.tiktok_url,
+        "is_active": profile.is_active,
     }
 
 
