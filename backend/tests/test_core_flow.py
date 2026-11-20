@@ -1,5 +1,6 @@
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -150,6 +151,38 @@ def test_avatar_follows_existing_author_posts_and_comments(environment):
     assert comment.status_code == 201, comment.text
     comments = client.get(f"/api/posts/{post.json()['id']}/comments").json()
     assert comments["items"][0]["author_avatar_url"] == avatar_url
+
+
+def test_video_larger_than_old_limit_uploads_in_chunks(environment):
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={"email": "admin@example.com", "password": "very-secure-password"}).status_code == 200
+    content = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * (30 * 1024 * 1024)
+    upload_id = str(uuid4())
+    chunk_size = 2 * 1024 * 1024
+    total = (len(content) + chunk_size - 1) // chunk_size
+    for index in range(total):
+        chunk = content[index * chunk_size:(index + 1) * chunk_size]
+        response = client.post("/api/admin/media/chunk", headers=csrf(client),
+                               data={"upload_id": upload_id, "index": index},
+                               files={"file": ("part", chunk)})
+        assert response.status_code == 200, response.text
+    completed = client.post("/api/admin/media/complete", headers=csrf(client), json={
+        "upload_id": upload_id, "total": total, "filename": "large.mp4",
+    })
+    assert completed.status_code == 201, completed.text
+    assert completed.json()["size_bytes"] == len(content)
+    assert completed.json()["media_type"] == "video"
+    assert client.get(completed.json()["url"]).content == content
+    abandoned = str(uuid4())
+    assert client.post("/api/admin/media/chunk", headers=csrf(client),
+                       data={"upload_id": abandoned, "index": 0},
+                       files={"file": ("part", b"abc")}).status_code == 200
+    cancelled = client.post("/api/admin/media/cancel", headers=csrf(client), json={
+        "upload_id": abandoned, "total": 1, "filename": "unused.mp4",
+    })
+    assert cancelled.status_code == 200
+    user_id = client.get("/api/auth/me").json()["id"]
+    assert not (Path(settings.upload_dir) / "tmp" / user_id / abandoned / "0").exists()
 
 
 def test_private_media_and_open_registration_do_not_expose_memories(environment):

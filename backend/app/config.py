@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     cookie_secure: bool = False
     upload_dir: str = "./uploads"
-    max_upload_mb: int = 25
+    max_upload_mb: int = 500
 
     model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 

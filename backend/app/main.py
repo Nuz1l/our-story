@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import re
@@ -13,7 +14,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -45,8 +46,8 @@ async def safety_headers(request: Request, call_next):
         if origin and origin != settings.frontend_origin:
             return JSONResponse({"detail": "Недоверенный источник запроса"}, status_code=403)
         path = request.url.path
-        category = "uploads" if path == "/api/admin/media" else "comments" if "/comments" in path else "writes"
-        limit, window = (20, 300) if category == "uploads" else (60, 60) if category == "comments" else (300, 60)
+        category = "uploads" if path.startswith("/api/admin/media") else "comments" if "/comments" in path else "writes"
+        limit, window = (600, 300) if category == "uploads" else (60, 60) if category == "comments" else (300, 60)
         access_cookie = request.cookies.get("access_token")
         identity = token_hash(access_cookie)[:16] if access_cookie else "guest"
         key = f"{request.client.host if request.client else 'unknown'}:{identity}:{category}"
@@ -496,7 +497,9 @@ def gallery(limit: int = Query(100, ge=1, le=200), db: Session = Depends(get_db)
 
 @app.post("/api/admin/media", status_code=201, dependencies=[Depends(csrf_protect)])
 async def upload_media(file: UploadFile = File(...), user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    raw = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    raw = await file.read(3 * 1024 * 1024 + 1)
+    if len(raw) > 3 * 1024 * 1024:
+        raise HTTPException(413, "Для файлов больше 3 МБ используйте загрузку частями")
     return await store_media(raw, file.filename or "upload", user, db)
 
 
@@ -532,8 +535,13 @@ async def store_media(raw: bytes, filename: str, user: User, db: Session) -> dic
         upload_dir = Path(settings.upload_dir).resolve()
         upload_dir.mkdir(parents=True, exist_ok=True)
         (upload_dir / key).write_bytes(raw)
+    return save_media_record(db, user, key, filename, kind, mime, len(raw), width, height)
+
+
+def save_media_record(db: Session, user: User, key: str, filename: str, kind: str, mime: str,
+                      size: int, width: int | None, height: int | None) -> dict:
     media = Media(storage_key=key, media_type=kind, mime_type=mime, original_name=Path(filename).name[:255],
-                  size_bytes=len(raw), width=width, height=height, uploaded_by_user_id=user.id)
+                  size_bytes=size, width=width, height=height, uploaded_by_user_id=user.id)
     db.add(media)
     db.flush()
     audit(db, user, "upload", "media", media.id)
@@ -548,7 +556,7 @@ CHUNK_BYTES = 2 * 1024 * 1024
 class CompleteUpload(BaseModel):
     upload_id: UUID
     total: int
-    filename: str
+    filename: str = Field(min_length=1, max_length=255)
 
 
 @app.post("/api/admin/media/chunk", dependencies=[Depends(csrf_protect)])
@@ -579,32 +587,106 @@ async def complete_media_upload(payload: CompleteUpload, user: User = Depends(ad
         raise HTTPException(422, "Invalid chunk count")
     prefix = f"tmp/{user.id}/{payload.upload_id}/"
     keys = [f"{prefix}{index}" for index in range(payload.total)]
-    parts = []
-    if os.getenv("BLOB_READ_WRITE_TOKEN"):
-        from vercel.blob import get_blob, delete_blob
+    blob_storage = bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
+    if blob_storage:
+        from vercel.blob import delete_blob, get_blob, multipart_upload_blob
         from vercel.blob.errors import BlobNotFoundError
-        try:
-            for key in keys:
-                parts.append((await get_blob(key, access="private")).body)
-        except BlobNotFoundError:
-            raise HTTPException(422, "Upload is incomplete") from None
+
+    async def read_chunk(key: str) -> bytes:
+        if blob_storage:
+            try:
+                return (await get_blob(key, access="private")).body
+            except BlobNotFoundError:
+                raise HTTPException(422, "Загрузка не завершена") from None
+        path = Path(settings.upload_dir).resolve() / key
+        if not path.is_file():
+            raise HTTPException(422, "Загрузка не завершена")
+        return path.read_bytes()
+
+    async def discard(keys_to_delete: list[str]) -> None:
+        if blob_storage:
+            await delete_blob(keys_to_delete)
+        else:
+            for old_key in keys_to_delete:
+                (Path(settings.upload_dir).resolve() / old_key).unlink(missing_ok=True)
+
+    first = await read_chunk(keys[0])
+    if not first or len(first) > CHUNK_BYTES:
+        raise HTTPException(422, "Неверный фрагмент файла")
+    ext = mime = kind = None
+    width = height = None
+    try:
+        with Image.open(io.BytesIO(first)) as image:
+            if image.format in {"JPEG", "PNG", "WEBP"}:
+                if image.width * image.height > 40_000_000:
+                    raise HTTPException(413, "Слишком большое разрешение изображения")
+                ext = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}[image.format]
+                mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}[image.format]
+                kind, width, height = "image", image.width, image.height
+    except (UnidentifiedImageError, OSError, ValueError):
+        pass
+    if not kind and len(first) > 12 and first[4:8] == b"ftyp":
+        ext, mime, kind = ".mp4", "video/mp4", "video"
+    if not kind and first[:4] == bytes.fromhex("1a45dfa3"):
+        ext, mime, kind = ".webm", "video/webm", "video"
+    if not kind:
+        raise HTTPException(415, "Поддерживаются JPG, PNG, WebP, MP4 и WebM")
+
+    final_key = f"{uuid4().hex}{ext}"
+    size = 0
+    if blob_storage:
+        async with multipart_upload_blob(final_key, access="private", content_type=mime) as upload:
+            for start in range(0, payload.total, 4):
+                batch_keys = keys[start:start + 4]
+                later = await asyncio.gather(*(read_chunk(key) for key in batch_keys[1 if start == 0 else 0:]))
+                chunks = [first, *later] if start == 0 else later
+                for offset, chunk in enumerate(chunks):
+                    index = start + offset
+                    if not chunk or len(chunk) > CHUNK_BYTES or (index < payload.total - 1 and len(chunk) != CHUNK_BYTES):
+                        raise HTTPException(422, "Неверный фрагмент файла")
+                    size += len(chunk)
+                    if size > settings.max_upload_mb * 1024 * 1024:
+                        raise HTTPException(413, "Файл слишком большой")
+                await upload.upload_part(b"".join(chunks))
+                await discard(batch_keys)
     else:
-        for key in keys:
-            path = Path(settings.upload_dir).resolve() / key
-            if not path.is_file():
-                raise HTTPException(422, "Upload is incomplete")
-            parts.append(path.read_bytes())
-    result = await store_media(b"".join(parts), payload.filename, user, db)
+        final_path = Path(settings.upload_dir).resolve() / final_key
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with final_path.open("wb") as output:
+                for index, key in enumerate(keys):
+                    chunk = first if index == 0 else await read_chunk(key)
+                    if not chunk or len(chunk) > CHUNK_BYTES or (index < payload.total - 1 and len(chunk) != CHUNK_BYTES):
+                        raise HTTPException(422, "Неверный фрагмент файла")
+                    size += len(chunk)
+                    if size > settings.max_upload_mb * 1024 * 1024:
+                        raise HTTPException(413, "Файл слишком большой")
+                    output.write(chunk)
+                    await discard([key])
+        except BaseException:
+            final_path.unlink(missing_ok=True)
+            raise
+    return save_media_record(db, user, final_key, payload.filename, kind, mime, size, width, height)
+
+
+@app.post("/api/admin/media/cancel", dependencies=[Depends(csrf_protect)])
+async def cancel_media_upload(payload: CompleteUpload, user: User = Depends(admin_user)):
+    max_chunks = (settings.max_upload_mb * 1024 * 1024 + CHUNK_BYTES - 1) // CHUNK_BYTES
+    if not 1 <= payload.total <= max_chunks:
+        raise HTTPException(422, "Неверное число фрагментов")
+    keys = [f"tmp/{user.id}/{payload.upload_id}/{index}" for index in range(payload.total)]
     if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        from vercel.blob import delete_blob
         await delete_blob(keys)
     else:
         for key in keys:
             (Path(settings.upload_dir).resolve() / key).unlink(missing_ok=True)
-    return result
+    return {"ok": True}
 
 
 @app.get("/api/media/{media_id}")
-async def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | None = Depends(optional_user)):
+async def get_media(media_id: UUID, request: Request, db: Session = Depends(get_db),
+                    user: User | None = Depends(optional_user)):
     media = db.get(Media, media_id)
     if not media:
         raise HTTPException(404, "Файл не найден")
@@ -622,6 +704,50 @@ async def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | 
     if not allowed:
         raise HTTPException(404, "Файл не найден")
     if os.getenv("BLOB_READ_WRITE_TOKEN"):
+        range_header = request.headers.get("range")
+        if media.media_type == "video" and range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if not match or not any(match.groups()):
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{media.size_bytes}"})
+            if match.group(1):
+                start = int(match.group(1))
+                requested_end = int(match.group(2)) if match.group(2) else media.size_bytes - 1
+            else:
+                suffix_size = int(match.group(2))
+                start = max(0, media.size_bytes - suffix_size)
+                requested_end = media.size_bytes - 1
+            if start >= media.size_bytes:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{media.size_bytes}"})
+            end = min(requested_end, start + 4 * 1024 * 1024 - 1, media.size_bytes - 1)
+            if end < start:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{media.size_bytes}"})
+            import httpx
+            from vercel.blob import head_blob
+
+            blob = await head_blob(media.storage_key)
+            client = httpx.AsyncClient(timeout=60)
+            upstream = await client.send(client.build_request(
+                "GET", blob.url, headers={
+                    "Authorization": f"Bearer {os.environ['BLOB_READ_WRITE_TOKEN']}",
+                    "Range": f"bytes={start}-{end}",
+                }), stream=True)
+            if upstream.status_code != 206:
+                await upstream.aclose()
+                await client.aclose()
+                raise HTTPException(502, "Видео временно недоступно")
+
+            async def range_chunks():
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        yield chunk
+                finally:
+                    await upstream.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(range_chunks(), status_code=206, media_type=media.mime_type,
+                                     headers={"Content-Range": f"bytes {start}-{end}/{media.size_bytes}",
+                                              "Content-Length": str(end - start + 1), "Accept-Ranges": "bytes",
+                                              "Cache-Control": "private, no-cache", "X-Robots-Tag": "noindex"})
         from vercel.blob import stream_blob
 
         async def chunks():
@@ -630,7 +756,7 @@ async def get_media(media_id: UUID, db: Session = Depends(get_db), user: User | 
                     yield chunk
 
         return StreamingResponse(chunks(), media_type=media.mime_type,
-                                 headers={"Cache-Control": "private, max-age=300", "X-Robots-Tag": "noindex"})
+                                 headers={"Cache-Control": "private, no-cache", "X-Robots-Tag": "noindex"})
     path = (Path(settings.upload_dir).resolve() / media.storage_key)
     if not path.is_file():
         raise HTTPException(404, "Файл недоступен")

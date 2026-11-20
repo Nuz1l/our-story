@@ -148,6 +148,7 @@ export function PostEditor() {
   const [rotation, setRotation] = useState(0);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
   const profiles = useQuery({
@@ -236,13 +237,15 @@ export function PostEditor() {
   }
   async function upload(files: FileList | File[]) {
     setUploading(true);
+    setUploadProgress(0);
     setError("");
     try {
       for (const file of Array.from(files)) {
         const prepared = file.type.startsWith("image/")
           ? await transformImage(file, ratio, rotation)
           : file;
-        const uploaded = await uploadMedia(prepared);
+        setUploadProgress(0);
+        const uploaded = await uploadMedia(prepared, setUploadProgress);
         setDirty(true);
         setDraft((d) => ({
           ...d,
@@ -263,6 +266,7 @@ export function PostEditor() {
       setError(errorMessage(err));
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
   }
   function moveMedia(index: number, delta: number) {
@@ -495,7 +499,7 @@ export function PostEditor() {
           <section className="panel">
             <h2>Фото и видео</h2>
             <p className="muted tiny">
-              JPG, PNG, WebP, MP4 и WebM до 25 МБ. Изображения можно обрезать по
+              JPG, PNG, WebP, MP4 и WebM до 500 МБ. Изображения можно обрезать по
               центру и повернуть перед загрузкой.
             </p>
             <div className="media-tools">
@@ -547,7 +551,7 @@ export function PostEditor() {
             >
               <UploadCloud size={27} />
               <strong>
-                {uploading ? "Загружаем файлы…" : "Перетащите файлы сюда"}
+                {uploading ? `Загружаем файл — ${uploadProgress}%` : "Перетащите файлы сюда"}
               </strong>
               <span>или нажмите для выбора</span>
             </button>
